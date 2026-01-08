@@ -1,0 +1,117 @@
+/*
+ * BLOCO DE FUNÇÃO: FB_Reactor_PID_Control
+ * DESCRIÇÃO: Algoritmo de controle para Reator Químico com lógica PID Discreta
+ * PLATAFORMA: Siemens TIA Portal / IEC 61131-3
+ * AUTOR: Gabriel Lucas Barbosa
+ */
+
+FUNCTION_BLOCK FB_Reactor_Control
+VAR_INPUT
+    Start_Process : BOOL;        // Botão Início
+    Stop_Emergency : BOOL;       // Parada Emergência
+    Temp_Sensor : REAL;          // Temperatura Atual (PV)
+    Temp_SetPoint : REAL;        // Temperatura Desejada (SP)
+    Level_Sensor : INT;          // Nível do Tanque (0-100%)
+END_VAR
+
+VAR_OUTPUT
+    Heater_PWM : BOOL;           // Saída para Resistência (Modulação de Largura de Pulso)
+    Mixer_Motor : BOOL;          // Motor do Misturador
+    Valve_Inlet : BOOL;          // Válvula de Entrada
+    Valve_Outlet : BOOL;         // Válvula de Saída
+    Status_Ready : BOOL;         // Status do Processo
+END_VAR
+
+VAR
+    // Variáveis PID Internas
+    Error : REAL;
+    Integral : REAL;
+    Derivative : REAL;
+    Last_Error : REAL;
+    Output_PID : REAL;
+    
+    // Constantes PID (Sintonia)
+    Kp : REAL := 2.5;  // Ganho Proporcional
+    Ki : REAL := 0.1;  // Ganho Integral
+    Kd : REAL := 0.5;  // Ganho Derivativo
+    
+    // Controle de Tempo
+    Cycle_Time : REAL := 0.1; // 100ms
+    Timer_Mixer : TON;        // Timer do misturador
+    State : INT := 0;         // Máquina de Estados (0: Idle, 1: Fill, 2: Heat, 3: Drain)
+END_VAR
+
+BEGIN
+    // Lógica de Segurança
+    IF Stop_Emergency THEN
+        State := 99; // Estado de Falha
+        Heater_PWM := FALSE;
+        Mixer_Motor := FALSE;
+        Valve_Inlet := FALSE;
+        Valve_Outlet := FALSE;
+        RETURN;
+    END_IF;
+
+    // Máquina de Estados Finita
+    CASE State OF
+        0: // IDLE (Aguardando)
+            Status_Ready := TRUE;
+            IF Start_Process THEN
+                Status_Ready := FALSE;
+                State := 1;
+            END_IF;
+
+        1: // FILLING (Enchendo)
+            Valve_Inlet := TRUE;
+            Valve_Outlet := FALSE;
+            // Se nível > 80%, começa aquecimento
+            IF Level_Sensor >= 80 THEN
+                Valve_Inlet := FALSE;
+                Mixer_Motor := TRUE; // Liga misturador
+                State := 2;
+            END_IF;
+
+        2: // HEATING (Controle PID)
+            // Cálculo do Erro
+            Error := Temp_SetPoint - Temp_Sensor;
+            
+            // Termo Integral (Acúmulo do erro no tempo)
+            Integral := Integral + (Error * Cycle_Time);
+            
+            // Termo Derivativo (Taxa de variação do erro)
+            Derivative := (Error - Last_Error) / Cycle_Time;
+            
+            // Cálculo Final do PID
+            Output_PID := (Kp * Error) + (Ki * Integral) + (Kd * Derivative);
+            Last_Error := Error;
+            
+            // Conversão PID -> PWM (Simulação simples)
+            // Se a saída do PID for alta, liga o aquecedor
+            IF Output_PID > 50.0 THEN
+                Heater_PWM := TRUE;
+            ELSE
+                Heater_PWM := FALSE;
+            END_IF;
+            
+            // Condição de Saída: Temperatura estável no SetPoint
+            IF ABS(Error) < 1.0 THEN
+                Timer_Mixer(IN := TRUE, PT := T#10M); // Mantém 10 min misturando
+                IF Timer_Mixer.Q THEN
+                    State := 3;
+                    Heater_PWM := FALSE;
+                    Mixer_Motor := FALSE;
+                END_IF;
+            END_IF;
+
+        3: // DRAINING (Esvaziando)
+            Valve_Outlet := TRUE;
+            IF Level_Sensor <= 0 THEN
+                Valve_Outlet := FALSE;
+                State := 0; // Volta ao início
+            END_IF;
+            
+        99: // ERROR HANDLING
+            // Lógica de reset manual necessária aqui
+            ;
+    END_CASE;
+END_FUNCTION_BLOCK
